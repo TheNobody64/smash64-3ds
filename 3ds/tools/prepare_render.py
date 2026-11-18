@@ -242,6 +242,15 @@ def main():
         needle='    if(rdp.'+name+'_color.r!=r||rdp.'+name+'_color.g!=g||rdp.'+name+'_color.b!=b||rdp.'+name+'_color.a!=a)gfx_flush();'
         pc=pc.replace(needle,'    if(rdp.'+name+'_color.r==r&&rdp.'+name+'_color.g==g&&rdp.'+name+'_color.b==b&&rdp.'+name+'_color.a==a)return;\n    gfx_flush();')
     pc=pc.replace('    gfx_sp_reset();','    gfx_sp_reset();\n    nativeDlFrameBegin();')
+    pc=pc.replace('static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {\n    rsp.geometry_mode &= ~clear;\n    rsp.geometry_mode |= set;\n}', 'static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {\n    uint32_t next=(rsp.geometry_mode&~clear)|set;\n    if(next!=rsp.geometry_mode)rsp.geometry_mode=next;\n}')
+    pc=pc.replace('    rdp.scissor.x = x;', '    if(rdp.scissor.x==x&&rdp.scissor.y==y&&rdp.scissor.width==width&&rdp.scissor.height==height)return;\n    rdp.scissor.x = x;')
+    pc=pc.replace('    rdp.viewport.x = x;', '    if(rdp.viewport.x==x&&rdp.viewport.y==y&&rdp.viewport.width==width&&rdp.viewport.height==height)return;\n    rdp.viewport.x = x;')
+    pc=pc.replace('rsp.current_num_lights = data / 24 + 1; // add ambient light', 'uint8_t nextLights=(uint8_t)(data/24+1);if(nextLights!=rsp.current_num_lights){rsp.current_num_lights=nextLights;rsp.lights_changed=1;}')
+    pc=pc.replace('rsp.current_num_lights = (data - 0x80000000U) / 32;', 'rsp.current_num_lights = (data - 0x80000000U) / 32;\\n            rsp.lights_changed = 1;')
+    pc=pc.replace('    rsp.lights_changed = 1;\n            break;', '    SUPPORT_CHECK(rsp.current_num_lights>=1 && rsp.current_num_lights<=MAX_LIGHTS+1);\n            break;')
+    pc=pc.replace('        case G_MW_FOG:\n            rsp.fog_mul = (int16_t)(data >> 16);\n            rsp.fog_offset = (int16_t)data;', '        case G_MW_FOG: {\n            int16_t nextMul=(int16_t)(data>>16),nextOffset=(int16_t)data;\n            if(nextMul==rsp.fog_mul&&nextOffset==rsp.fog_offset)break;\n            rsp.fog_mul=nextMul;rsp.fog_offset=nextOffset;')
+    pc=pc.replace('            gfx_rapi->set_fog(rsp.fog_mul, rsp.fog_offset);\n#endif\n            break;', '            gfx_rapi->set_fog(rsp.fog_mul, rsp.fog_offset);\n#endif\n            break;\n        }')
+    pc=pc.replace('memset(rsp.current_lights+lightidx,0,sizeof(Light_t));\n                memcpy(rsp.current_lights+lightidx,data,size<sizeof(Light_t)?size:sizeof(Light_t));\n                rsp.lights_changed=1;', 'Light_t nextLight;memset(&nextLight,0,sizeof(nextLight));\n                memcpy(&nextLight,data,size<sizeof(Light_t)?size:sizeof(Light_t));\n                if(memcmp(&rsp.current_lights[lightidx],&nextLight,sizeof(Light_t))!=0){rsp.current_lights[lightidx]=nextLight;rsp.lights_changed=1;}')
     pc=function(pc,'gfx_dp_load_tlut','''    SUPPORT_CHECK(tile<8 && rdp.tile_tmem[tile]>=256);
     unsigned offset=(rdp.tile_tmem[tile]-256)*2,bytes=((high_index+1)*2+7)&~7;
     SUPPORT_CHECK(offset<512 && bytes<=512-offset);
