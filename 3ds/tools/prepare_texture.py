@@ -7,23 +7,7 @@ def frontend(pc):
     pc=pc.replace('    (*node)->cmt = 0;', '    (*node)->cmt = 255;')
     pc=pc.replace('if ((*node)->texture_addr == orig_addr &&', 'if (!(native_test_dump_textures&&ssb_frame_count==850) && (*node)->texture_addr == orig_addr &&')
     pc=pc.replace('(*node)->texture_addr == orig_addr &&', 'nativeTextureAlive((*node)->texture_id) && (*node)->texture_addr == orig_addr &&')
-    pc=pc.replace('    gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);', '''    gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
-    /* A texture touched in this frame is pinned until the next FrameBegin.
-     * Check each unit/ID once per frame instead of making two bridge calls
-     * for every triangle that uses the same texture. */
-    static uint32_t nativeTextureCheckFrame[2]={0xffffffffu,0xffffffffu};
-    static unsigned nativeTextureCheckId[2]={~0u,~0u};
-    for(unsigned i=0;i<2;i++)if(used_textures[i]&&rendering_state.textures[i]){
-        unsigned id=rendering_state.textures[i]->texture_id;
-        if(nativeTextureCheckFrame[i]!=ssb_frame_count||nativeTextureCheckId[i]!=id){
-            nativeTextureCheckFrame[i]=ssb_frame_count;
-            nativeTextureCheckId[i]=id;
-            if(!nativeTextureAlive(id)){
-                rdp.textures_changed[i]=true;
-                nativeTextureCheckId[i]=~0u;
-            } else nativeTextureTouch(id);
-        }
-    }''')
+    pc=pc.replace('    const bool *used_textures=comb->used_textures;', '    const bool *used_textures=comb->used_textures;\n    gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);\n    /* A texture touched in this frame is pinned until the next FrameBegin.\n     * Check each unit/ID once per frame instead of making two bridge calls\n     * for every triangle that uses the same texture. */\n    static uint32_t nativeTextureCheckFrame[2]={0xffffffffu,0xffffffffu};\n    static unsigned nativeTextureCheckId[2]={~0u,~0u};\n    for(unsigned i=0;i<2;i++)if(used_textures[i]&&rendering_state.textures[i]){\n        unsigned id=rendering_state.textures[i]->texture_id;\n        if(nativeTextureCheckFrame[i]!=ssb_frame_count||nativeTextureCheckId[i]!=id){\n            nativeTextureCheckFrame[i]=ssb_frame_count;\n            nativeTextureCheckId[i]=id;\n            if(!nativeTextureAlive(id)){\n                rdp.textures_changed[i]=true;\n                nativeTextureCheckId[i]=~0u;\n            } else nativeTextureTouch(id);\n        }\n    }')
     pc=pc.replace('uint8_t cms, cmt;', 'uint8_t cms,cmt,masks,maskt,shifts,shiftt,palette_index;')
     pc=pc.replace('    } texture_tile;', '    } texture_tile;\n    uint16_t effective_width[2],effective_height[2],physical_width[2],physical_height[2];')
     pc=pc.replace('SUPPORT_CHECK(palette == 0);', 'rdp.texture_tile.palette_index=palette;\n        rdp.texture_tile.masks=masks;rdp.texture_tile.maskt=maskt;\n        rdp.texture_tile.shifts=shifts;rdp.texture_tile.shiftt=shiftt;')
