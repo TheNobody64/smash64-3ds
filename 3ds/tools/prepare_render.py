@@ -135,7 +135,7 @@ def main():
     bool use_fog=fog_blend&&((rdp.other_mode_l>>26)&3)==G_BL_A_SHADE;
     native_fog_primitive=fog_blend&&((rdp.other_mode_l>>26)&3)==G_BL_A_FOG;''')
     pc=pc.replace('static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mode) {', 'static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mode) {\n    gfx_flush();')
-    pc=pc.replace('static void gfx_dp_set_fog_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {', 'static void gfx_dp_set_fog_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {\n    gfx_flush();')
+    pc=pc.replace('static void gfx_dp_set_fog_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {', 'static void gfx_dp_set_fog_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {\n    if(rdp.fog_color.r==r&&rdp.fog_color.g==g&&rdp.fog_color.b==b&&rdp.fog_color.a==a)return;\n    gfx_flush();')
     pc=pc.replace('        uint8_t tile_number;', '        uint8_t tile_number;\n        uint16_t width;')
     pc=pc.replace('        uint32_t size_bytes;', '        uint32_t size_bytes;\n        const uint8_t* pixels;\n        uint8_t staging[4096];')
     pc=pc.replace('    const uint8_t *palette;', '    const uint8_t *palette;\n    uint8_t palette_data[512];\n    uint32_t palette_hash;\n    uint16_t tile_tmem[8],tile_line[8];')
