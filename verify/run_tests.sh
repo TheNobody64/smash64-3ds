@@ -18,4 +18,4 @@ gcc -O2 "$HERE/test_mixer.c" ref.o opt.o stubs.o a1.o a2.o -o t_mixer
 echo "== mixer: reference vs optimized (bit-exact?)"; ./t_mixer
 gcc -O2 -I"$HERE" "$HERE/test_ticks.c" -o t_ticks;               echo "== tick conversion: standalone";        ./t_ticks
 gcc -O2 -std=gnu11 "$HERE/test_ticks_verbatim.c" -o t_tv;        echo "== tick conversion: verbatim from platform_3ds.c"; ./t_tv
-gcc -O2 -msse2 -mfpmath=sse -ffp-contract=off -std=gnu11 "$HERE/test_render_math.c" -o t_rm -lm; echo "== renderer math: colour LUT + divide-free cull"; ./t_rm
+gcc -O2 -msse2 -mfpmath=sse -ffp-contract=off -std=gnu11 -I"$HERE/../3ds/include" "$HERE/test_render_math.c" -o t_rm -lm; echo "== renderer math: colour LUT + divide-free cull"; ./t_rm

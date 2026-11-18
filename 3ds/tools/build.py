@@ -59,7 +59,7 @@ def game_flags():
                 UPSTREAM/'port', UPSTREAM/'debug_tools',
                 UPSTREAM/'libultraship/src', UPSTREAM/'libultraship/include']
     includes += [SDK/'libctru/include']
-    return [*ARCH, '-std=gnu11', '-O2', '-g', '-fno-short-enums',
+    return [*ARCH, '-std=gnu11', '-O2', '-g', '-fno-math-errno', '-fno-short-enums',
             '-fno-strict-aliasing', '-fwrapv', '-ffp-contract=off',
             '-fno-builtin-sinf', '-fno-builtin-cosf',
             '-ffunction-sections', '-fdata-sections',
@@ -72,6 +72,7 @@ def game_flags():
             '-Wno-unknown-pragmas', '-Wno-implicit-int', '-Wno-shift-negative-value',
             '-Wno-parentheses-equality', '-Wno-pointer-sign',
             '-Wno-constant-conversion', '-Wno-tautological-constant-out-of-range-compare',
+            *os.environ.get('SSB_GAME_CFLAGS','').split(),
             *['-I'+str(p) for p in includes], '-isystem', str(ARM/'arm-none-eabi/include')]
 
 def compile_game():

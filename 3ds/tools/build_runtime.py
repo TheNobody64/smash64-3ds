@@ -39,7 +39,7 @@ def main():
         if src.stem in ['game_host','vanilla_policy','render_bridge','gfx_pc','save_layout_check','stereo_camera','bottom_game','wallpaper','control_game']:
             flags=game_flags()
         else:
-            flags=[*ARCH,'-std=gnu11','-O2','-g','-D__3DS__','-DSSB_BRINGUP',
+            flags=[*ARCH,'-std=gnu11','-O2','-g','-fno-math-errno','-D__3DS__','-DSSB_BRINGUP',
                    '-ffunction-sections','-fdata-sections',
                    '-fshort-enums' if src.stem in ['platform_3ds','performance','render_device','gfx_citro3d','bottom_3ds','io_worker'] else '-fno-short-enums',
                    '-I'+str(SDK/'libctru/include'),'-I'+str(UPSTREAM/'port'),
@@ -49,6 +49,8 @@ def main():
         if args.release:flags += ['-DSSB_RELEASE']
         if args.bench:flags += ['-DSSB_BENCH']
         flags += profile
+        if src.stem in ['render_thread','render_bridge','render_device','gfx_pc','gfx_cc','gfx_citro3d']:
+            flags += os.environ.get('SSB_RENDER_CFLAGS','').split()
         flags += os.environ.get('SSB_EXTRA_CFLAGS','').split()  # e.g. -DSSB_STAGE_PROFILE
         run([BIN/'clang.exe',*flags,'-c',src,'-o',obj]);objects.append(obj)
     asm=(UPSTREAM/'port/coroutine_armv7.S').read_text().replace('.fpu    vfpv3-d16','.fpu    vfp')

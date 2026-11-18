@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include "native_color_lut.h"
 static uint64_t rs = 0x2545F4914F6CDD1Dull;
 static uint32_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return (uint32_t)(rs >> 11); }
 static float frand(float lo, float hi) { return lo + (hi - lo) * ((rnd() & 0xFFFFFF) / 16777216.0f); }
@@ -33,10 +34,13 @@ static float area_ndc(const V*a, const V*b, const V*c) {   /* |cross| in NDC for
 
 int main(void) {
     /* 1. colour LUT must be bit-identical to the per-vertex int->float multiply */
-    static float lut[256]; int lutbad = 0;
-    for (int i = 0; i < 256; i++) lut[i] = (float)i * (1.0f / 255.0f);
-    for (int i = 0; i < 256; i++) { volatile uint8_t c = (uint8_t)i; float a = c * (1.0f / 255.0f); if (bits(a) != bits(lut[i])) lutbad++; }
-    printf("colour LUT: %d / 256 differ\n", lutbad);
+    int lutbad = 0;
+    for (int i = 0; i < 256; i++) {
+        volatile uint8_t c = (uint8_t)i;
+        float reference = c * (1.0f / 255.0f);
+        if (bits(reference) != bits(nativeColorLut[i])) lutbad++;
+    }
+    printf("shipped colour LUT: %d / 256 differ\n", lutbad);
 
     /* 2. cull test with a realistic generator: points are made in NDC (|X|,|Y| <= 1.5, i.e. on or near
      *    the screen), then scaled by w. Slivers are built in NDC with a tiny perpendicular offset. */

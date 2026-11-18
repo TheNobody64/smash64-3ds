@@ -43,7 +43,7 @@ def main():
     # physical viewport without allocating an oversized render target.
     pc=pc.replace('#define SCREEN_WIDTH 320', 'extern uint32_t native_game_width,native_game_height;\n#define SCREEN_WIDTH native_game_width')
     pc=pc.replace('#define SCREEN_HEIGHT 240', '#define SCREEN_HEIGHT native_game_height')
-    pc=pc.replace('#include "gfx_3ds.h"','#include "rsp_platform.h"').replace('#include "src/pc/profiler_3ds.h"','#define profiler_3ds_log_time(id) ((void)0)')
+    pc=pc.replace('#include "gfx_3ds.h"','#include "rsp_platform.h"\n#include "native_color_lut.h"').replace('#include "src/pc/profiler_3ds.h"','#define profiler_3ds_log_time(id) ((void)0)')
     pc=pc.replace('#define SUPPORT_CHECK(x) assert(x)', '#undef assert\n#define assert(x) ((x)?(void)0:nativeRenderAssertion(#x,__LINE__,native_current_dl))\n#define SUPPORT_CHECK(x) assert(x)')
     pc=pc.replace('#define MAX_LIGHTS 2','#define MAX_LIGHTS 7')
     pc=pc.replace('float wMod = w * 1.2f; // expanded w-range for testing clip rejection', 'float wMod=w+(native_stereo_perspective?fabsf(gSliderLevel*NATIVE_STEREO_SHIFT_MAX*(w-native_stereo_focus_w)):0.0f);')
@@ -343,10 +343,10 @@ static void gfx_dp_set_combine_mode(''')
     for ch in 'rgb':
         a=f'                    buf_vbo[buf_vbo_len++] = color->{ch} / 255.0f;'
         if pc.count(a)!=1:raise ValueError(a)
-        pc=pc.replace(a,f'                    buf_vbo[buf_vbo_len++] = color->{ch} * (1.0f / 255.0f);')
+        pc=pc.replace(a,f'                    buf_vbo[buf_vbo_len++] = nativeColorLut[color->{ch}];')
     a='                        buf_vbo[buf_vbo_len++] = color->a / 255.0f;'
     if pc.count(a)!=1:raise ValueError(a)
-    pc=pc.replace(a,'                        buf_vbo[buf_vbo_len++] = color->a * (1.0f / 255.0f);')
+    pc=pc.replace(a,'                        buf_vbo[buf_vbo_len++] = nativeColorLut[color->a];')
     # Vertex transform: hoist per-call state out of the per-vertex loop. The
     # build allows any store to alias (-fno-strict-aliasing), so the compiler
     # reloaded all 16 matrix elements and the light state for every vertex,

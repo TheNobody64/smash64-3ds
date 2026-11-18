@@ -1,6 +1,7 @@
 """Compile the ARM asset, audio and vanilla fighter support libraries."""
 import concurrent.futures
 import json
+import os
 import subprocess
 import sys
 from build import ROOT, UPSTREAM, ARM, SDK, BIN, OUT, ARCH, run, game_flags, GCC_VERSION, configured
@@ -14,14 +15,15 @@ def compile_support():
          UPSTREAM/'port/resource/RelocFileTable.us.cpp',
          UPSTREAM/'port/port_aobj_fixup.cpp',
          UPSTREAM/'port/fighter_registry.cpp']
-    c=[UPSTREAM/'port/audio/mixer.c',UPSTREAM/'port/audio/audio_dma.c']
+    c=[ROOT/'src/mixer_3ds.c',UPSTREAM/'port/audio/audio_dma.c']
     cxxver=GCC_VERSION
     cxx=configured('cxx_include',ROOT/'toolchain/c++'/cxxver if (ROOT/'toolchain/c++'/cxxver).exists() else ARM/'arm-none-eabi/include/c++'/cxxver)
-    common=[*ARCH,'-O2','-g','-fno-strict-aliasing','-fwrapv','-ffp-contract=off',
+    common=[*ARCH,'-O2','-g','-fno-math-errno','-fno-strict-aliasing','-fwrapv','-ffp-contract=off',
             '-ffunction-sections','-fdata-sections','-DREGION_US=1','-DVERSION_US=1','-DPORT=1',
             '-D__3DS__','-fno-short-enums',
             *['-I'+str(p) for p in [ROOT/'include',UPSTREAM/'port',UPSTREAM/'debug_tools',
                UPSTREAM/'libultraship/include',SDK/'libctru/include']]]
+    common += os.environ.get('SSB_GAME_CFLAGS','').split()
     def one(src):
         iscpp=src.suffix=='.cpp'
         obj=OUT/'support'/(src.stem+'.o')
