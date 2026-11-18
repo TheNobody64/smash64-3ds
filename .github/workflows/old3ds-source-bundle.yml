@@ -27,16 +27,27 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          source = Path("3ds/renderer/gfx_pc.c").read_text()
-          required = [
+          pc = Path("3ds/renderer/gfx_pc.c").read_text()
+          required_pc = [
               "color_lut[256]",
               "gfx_ensure_mp_matrix",
               "rsp.mp_dirty",
+              "lookup_cache[256]",
+              "comb->num_inputs",
+              "const bool *used_textures=comb->used_textures",
+              "nativeTextureCheckFrame[2]",
+              "uint8_t nextLights=",
+              "nextMul=(int16_t)(data>>16)",
+              "Light_t nextLight",
+              "bool changed=t->fmt!=fmt",
+              "uint32_t next=(rsp.geometry_mode&~clear)|set",
           ]
-          missing = [item for item in required if item not in source]
+          missing = [item for item in required_pc if item not in pc]
           if missing:
-              raise SystemExit("Missing generated renderer content: " + ", ".join(missing))
-          if "/* ... truncated" in source:
+              raise SystemExit("Missing generated gfx_pc.c optimizations: " + ", ".join(missing))
+          if "gfx_rapi->shader_get_info(prg, &num_inputs, used_textures)" in pc:
+              raise SystemExit("Per-triangle shader metadata query is still present")
+          if "/* ... truncated" in pc:
               raise SystemExit("Found an incomplete placeholder in generated renderer")
           print("Generated renderer contains all optimization anchors.")
           PY
