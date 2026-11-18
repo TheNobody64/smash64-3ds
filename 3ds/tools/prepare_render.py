@@ -1,6 +1,7 @@
 """Adapt the inspected sm64-port 3DS backend; retain upstream sources alongside it."""
 import re
 import shutil
+import struct
 from build import ROOT,RENDER_SOURCE
 import prepare_texture
 import prepare_tmem
@@ -46,6 +47,32 @@ def main():
     pc=pc.replace('#include "gfx_3ds.h"','#include "rsp_platform.h"').replace('#include "src/pc/profiler_3ds.h"','#define profiler_3ds_log_time(id) ((void)0)')
     pc=pc.replace('#define SUPPORT_CHECK(x) assert(x)', '#undef assert\n#define assert(x) ((x)?(void)0:nativeRenderAssertion(#x,__LINE__,native_current_dl))\n#define SUPPORT_CHECK(x) assert(x)')
     pc=pc.replace('#define MAX_LIGHTS 2','#define MAX_LIGHTS 7')
+    # Cache byte-to-float color conversion. Generate exact float32 results of
+    # the previous (float)byte * (1.0f / 255.0f) expression.
+    reciprocal=struct.unpack('<f',struct.pack('<f',1.0/255.0))[0]
+    values=[]
+    for i in range(256):
+        value=struct.unpack('<f',struct.pack('<f',float(i)*reciprocal))[0]
+        literal=format(value,'.9g')
+        if '.' not in literal and 'e' not in literal: literal += '.0'
+        values.append(literal+'f')
+    lut=',\\n'.join('    '+', '.join(values[i:i+8]) for i in range(0,256,8))
+    pc=pc.replace('#define MAX_LIGHTS 7', '#define MAX_LIGHTS 7\\nstatic const float color_lut[256] = {\\n'+lut+'\\n};')
+    # Matrix stack changes are cheap to record; materialize MP only when a
+    # consumer needs it (vertex transform, MOVEWORD matrix edit, or special opcode).
+    pc=pc.replace('    float MP_matrix[4][4];', '    float MP_matrix[4][4];\\n    bool mp_dirty;')
+    pc=pc.replace('static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {',
+        'static void gfx_ensure_mp_matrix(void) {\\n    if (!rsp.mp_dirty) return;\\n    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);\\n    rsp.mp_dirty = false;\\n}\\n\\nstatic void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {')
+    pc=pc.replace('    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);\\n}\\n\\nstatic void gfx_sp_pop_matrix',
+        '    rsp.mp_dirty = true;\\n}\\n\\nstatic void gfx_sp_pop_matrix')
+    pc=function(pc,'gfx_sp_pop_matrix','''    while (count--) {
+        if (rsp.modelview_matrix_stack_size > 0) {
+            --rsp.modelview_matrix_stack_size;
+            if (rsp.modelview_matrix_stack_size > 0) rsp.mp_dirty = true;
+        }
+    }
+    rsp.lights_changed = true;''')
+    pc=pc.replace('static void gfx_sp_reset() {', 'static void gfx_sp_reset() {\\n    rsp.mp_dirty=false;')
     pc=pc.replace('float wMod = w * 1.2f; // expanded w-range for testing clip rejection', 'float wMod=w+(native_stereo_perspective?fabsf(gSliderLevel*NATIVE_STEREO_SHIFT_MAX*(w-native_stereo_focus_w)):0.0f);')
     pc=pc.replace('if (y < -wMod)', 'if (y < -w)').replace('if (y > wMod)', 'if (y > w)')
     # N64 intensity textures replicate intensity into alpha as well as RGB.
@@ -79,7 +106,7 @@ def main():
     pc=pc.replace('struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];','SUPPORT_CHECK(color_combiner_pool_size < 512);\n    struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];')
     pc=pc.replace('uint32_t other_mode_l, other_mode_h;', 'uint32_t other_mode_l, other_mode_h;\n    uint32_t blend_color,prim_depth,combine_raw[2];')
     pc=pc.replace('            case G_SETCOMBINE:', '            case G_SETCOMBINE:\n                rdp.combine_raw[0]=cmd->words.w0;rdp.combine_raw[1]=cmd->words.w1;')
-    pc=pc.replace('    uint64_t cc_id = rdp.combine_mode;', '    nativeCombineTrace(rdp.combine_raw[0],rdp.combine_raw[1],rdp.other_mode_l,rdp.other_mode_h);\n    uint64_t cc_id = rdp.combine_mode;')
+    pc=pc.replace('    uint64_t cc_id = rdp.combine_mode;', '    #ifdef SSB_BENCH\n    nativeCombineTrace(rdp.combine_raw[0],rdp.combine_raw[1],rdp.other_mode_l,rdp.other_mode_h);\n    #endif\n    uint64_t cc_id = rdp.combine_mode;')
     pc=pc.replace('bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;', '''bool fog_blend=(rdp.other_mode_l>>30)==G_BL_CLR_FOG;
     bool use_fog=fog_blend&&((rdp.other_mode_l>>26)&3)==G_BL_A_SHADE;
     native_fog_primitive=fog_blend&&((rdp.other_mode_l>>26)&3)==G_BL_A_FOG;''')
@@ -97,6 +124,7 @@ def main():
     pc=pc.replace('(Gfx *)seg_addr(cmd->words.w1)', '(Gfx *)nativeResolveGfxAddress(cmd->words.w1,cmd,true)')
     pc=pc.replace('        case G_MW_NUMLIGHT:', '        case G_MW_SEGMENT:\n            nativeSetSegment(offset/4,data);\n            break;\n        case G_MW_NUMLIGHT:')
     pc=pc.replace('        case G_MW_SEGMENT:', '''        case G_MW_MATRIX: {
+            gfx_ensure_mp_matrix();
             SUPPORT_CHECK(offset<64 && !(offset&3));
             unsigned element=(offset&31)/2;
             float* matrix=&rsp.MP_matrix[0][0];
@@ -133,11 +161,13 @@ def main():
     pc=pc.replace('calculate_normal_dir(&lookat_x,', 'calculate_normal_dir((rsp.lookat_valid&1)?&rsp.current_lookat[0]:&lookat_x,')
     pc=pc.replace('calculate_normal_dir(&lookat_y,', 'calculate_normal_dir((rsp.lookat_valid&2)?&rsp.current_lookat[1]:&lookat_y,')
     pc=pc.replace('static void gfx_sp_pop_matrix(uint32_t count) {', 'static void gfx_sp_pop_matrix(uint32_t count) {\n    rsp.lights_changed=true;')
-    pc=pc.replace('    //if (rand()%2) return;', '''    extern volatile uint32_t ssb_frame_count;
+    pc=pc.replace('    //if (rand()%2) return;', '''    #ifdef SSB_BENCH
+    extern volatile uint32_t ssb_frame_count;
     static unsigned shadeTrace;
     if(ssb_frame_count==850 && (rsp.geometry_mode&G_LIGHTING) && shadeTrace++<160)port_log("SHADE gm=%08x combine=%08x,%08x color=%u,%u,%u,%u lights=%u ambient=%u,%u,%u\\n",
         rsp.geometry_mode,rdp.combine_raw[0],rdp.combine_raw[1],v1->color.r,v1->color.g,v1->color.b,v1->color.a,
-        rsp.current_num_lights,rsp.current_lights[rsp.current_num_lights-1].col[0],rsp.current_lights[rsp.current_num_lights-1].col[1],rsp.current_lights[rsp.current_num_lights-1].col[2]);''')
+        rsp.current_num_lights,rsp.current_lights[rsp.current_num_lights-1].col[0],rsp.current_lights[rsp.current_num_lights-1].col[1],rsp.current_lights[rsp.current_num_lights-1].col[2]);
+    #endif''')
     pc=pc.replace('    if (tile == 1) return;','    if (tile == 1) return;') # second texture support is audited separately
     pc=pc.replace('    rdp.palette = rdp.texture_to_load.addr;', '    portRelocFixupTextureAtRuntime(rdp.texture_to_load.addr,(high_index+1)*2);\n    rdp.palette = rdp.texture_to_load.addr;')
     pc=pc.replace('    SUPPORT_CHECK(tile == G_TX_LOADTILE);\n    SUPPORT_CHECK(rdp.texture_to_load.siz == G_IM_SIZ_16b);','    SUPPORT_CHECK(tile < 8);\n    SUPPORT_CHECK(rdp.texture_to_load.siz == G_IM_SIZ_16b);')
@@ -146,6 +176,7 @@ def main():
     a=pc.index('#ifdef TARGET_N3DS\n            case G_SPECIAL_1:');b=pc.index('#endif',a)+len('#endif')
     pc=pc[:a]+'''            case G_SPECIAL_1:
                 gfx_matrix_mul(rsp.MP_matrix,rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size-1],rsp.P_matrix);
+                rsp.mp_dirty=false;
                 break;
             case G_RDPLOADSYNC: case G_RDPPIPESYNC: case G_RDPTILESYNC: case G_RDPFULLSYNC:
             case G_LOAD_UCODE:
@@ -257,7 +288,7 @@ void portTextureCacheDeleteRange(const void* base,size_t size) {
     pc=pc.replace('portRelocFixupTextureAtRuntime(', 'nativeFixTexture(').replace('portRelocFixupVertexAtRuntime(', 'nativeFixVertices(')
     packed=lambda name:'rdp.'+name+'_color.r|((uint32_t)rdp.'+name+'_color.g<<8)|((uint32_t)rdp.'+name+'_color.b<<16)|((uint32_t)rdp.'+name+'_color.a<<24)'
     update='nativeSetSecondCycle(rdp.combine_raw[0],rdp.combine_raw[1],rdp.other_mode_h,'+packed('env')+','+packed('prim')+');'
-    pc=pc.replace('case G_SETCOMBINE:\n', 'case G_SETCOMBINE:\n                gfx_flush();\n')
+    pc=pc.replace('case G_SETCOMBINE:\n', 'case G_SETCOMBINE:\n                if(rdp.combine_raw[0]!=cmd->words.w0||rdp.combine_raw[1]!=cmd->words.w1)gfx_flush();\n')
     pc=pc.replace('rdp.combine_raw[1]=cmd->words.w1;', 'rdp.combine_raw[1]=cmd->words.w1;'+update)
     pc=pc.replace('rdp.other_mode_h = (uint32_t)(om >> 32);', 'rdp.other_mode_h = (uint32_t)(om >> 32);'+update)
     pc=pc.replace('rdp.env_color.a = a;', 'rdp.env_color.a = a;'+update)
@@ -343,17 +374,18 @@ static void gfx_dp_set_combine_mode(''')
     for ch in 'rgb':
         a=f'                    buf_vbo[buf_vbo_len++] = color->{ch} / 255.0f;'
         if pc.count(a)!=1:raise ValueError(a)
-        pc=pc.replace(a,f'                    buf_vbo[buf_vbo_len++] = color->{ch} * (1.0f / 255.0f);')
+        pc=pc.replace(a,f'                    buf_vbo[buf_vbo_len++] = color_lut[color->{ch}];')
     a='                        buf_vbo[buf_vbo_len++] = color->a / 255.0f;'
     if pc.count(a)!=1:raise ValueError(a)
-    pc=pc.replace(a,'                        buf_vbo[buf_vbo_len++] = color->a * (1.0f / 255.0f);')
+    pc=pc.replace(a,'                        buf_vbo[buf_vbo_len++] = color_lut[color->a];')
     # Vertex transform: hoist per-call state out of the per-vertex loop. The
     # build allows any store to alias (-fno-strict-aliasing), so the compiler
     # reloaded all 16 matrix elements and the light state for every vertex,
     # and it called the widescreen scale and divided by 127 per light each
     # time. Scenes with many lit fighters (the Fighting Polygon intro draws
     # 30 models a frame) spent most of their translation time here.
-    pc=function(pc,'gfx_sp_vertex','''    SUPPORT_CHECK(dest_index+n_vertices <= MAX_VERTICES);
+    pc=function(pc,'gfx_sp_vertex','''    gfx_ensure_mp_matrix();
+    SUPPORT_CHECK(dest_index+n_vertices <= MAX_VERTICES);
     nativeFixVertices(vertices,n_vertices);
     const float m00=rsp.MP_matrix[0][0],m01=rsp.MP_matrix[0][1],m02=rsp.MP_matrix[0][2],m03=rsp.MP_matrix[0][3];
     const float m10=rsp.MP_matrix[1][0],m11=rsp.MP_matrix[1][1],m12=rsp.MP_matrix[1][2],m13=rsp.MP_matrix[1][3];
