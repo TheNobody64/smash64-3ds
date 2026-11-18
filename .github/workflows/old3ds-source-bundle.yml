@@ -1,0 +1,67 @@
+name: Experimental Old 3DS source bundle
+on:
+  push:
+    branches:
+      - old3ds-renderer-optimizations
+permissions:
+  contents: read
+jobs:
+  validate-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source and pinned submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check Python syntax
+        run: python -m compileall -q 3ds/tools
+      - name: Regenerate renderer sources
+        working-directory: 3ds
+        run: python tools/prepare_render.py
+      - name: Verify generated optimization anchors
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("3ds/renderer/gfx_pc.c").read_text()
+          required = [
+              "color_lut[256]",
+              "gfx_ensure_mp_matrix",
+              "rsp.mp_dirty",
+          ]
+          missing = [item for item in required if item not in source]
+          if missing:
+              raise SystemExit("Missing generated renderer content: " + ", ".join(missing))
+          if "/* ... truncated" in source:
+              raise SystemExit("Found an incomplete placeholder in generated renderer")
+          print("Generated renderer contains all optimization anchors.")
+          PY
+      - name: Create source archive
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+          root = Path(".").resolve()
+          target = Path("${{ runner.temp }}/smash64-3ds-old3ds-experimental-source.zip")
+          excluded = {".git", "__pycache__", "build", "toolchain"}
+          with ZipFile(target, "w", ZIP_DEFLATED, compresslevel=6) as archive:
+              for path in root.rglob("*"):
+                  relative = path.relative_to(root)
+                  if any(part in excluded for part in relative.parts):
+                      continue
+                  if path.name == "build-config.json" or not path.is_file():
+                      continue
+                  archive.write(path, Path("smash64-3ds") / relative)
+          print(f"Created {target} ({target.stat().st_size} bytes)")
+          PY
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: smash64-3ds-old3ds-experimental-source
+          path: ${{ runner.temp }}/smash64-3ds-old3ds-experimental-source.zip
+          if-no-files-found: error
+          retention-days: 14
