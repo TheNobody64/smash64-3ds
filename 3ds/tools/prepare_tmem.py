@@ -51,17 +51,24 @@ static void nativePrepareTile(int unit){
     pc=replace_function(pc,'gfx_dp_set_tile','''    SUPPORT_CHECK(tile<8);
     struct NativeTile* t=&rdp.tiles[tile];
     if(!masks)cms=G_TX_CLAMP;if(!maskt)cmt=G_TX_CLAMP;
+    unsigned lineBytes=line*8;
+    bool changed=t->fmt!=fmt||t->siz!=siz||t->cms!=cms||t->cmt!=cmt||
+        t->masks!=masks||t->maskt!=maskt||t->shifts!=shifts||t->shiftt!=shiftt||
+        t->palette_index!=palette||t->line_size_bytes!=lineBytes||
+        rdp.tile_tmem[tile]!=tmem||rdp.tile_line[tile]!=lineBytes;
+    if(!changed)return;
     t->fmt=fmt;t->siz=siz;t->cms=cms;t->cmt=cmt;t->masks=masks;t->maskt=maskt;
-    t->shifts=shifts;t->shiftt=shiftt;t->palette_index=palette;t->line_size_bytes=line*8;
-    rdp.tile_tmem[tile]=tmem;rdp.tile_line[tile]=line*8;
-    if(tile==rdp.first_tile)rdp.texture_tile=*t;
-    rdp.textures_changed[0]=rdp.textures_changed[1]=true;''')
+    t->shifts=shifts;t->shiftt=shiftt;t->palette_index=palette;t->line_size_bytes=lineBytes;
+    rdp.tile_tmem[tile]=tmem;rdp.tile_line[tile]=lineBytes;
+    if(tile==rdp.first_tile){rdp.texture_tile=*t;rdp.textures_changed[0]=true;}
+    else if(tile==((rdp.first_tile+1)&7))rdp.textures_changed[1]=true;''')
     pc=replace_function(pc,'gfx_dp_set_tile_size','''    SUPPORT_CHECK(tile<8);
     struct NativeTile* t=&rdp.tiles[tile];
+    if(t->uls==uls&&t->ult==ult&&t->lrs==lrs&&t->lrt==lrt)return;
     t->uls=uls;t->ult=ult;t->lrs=lrs;t->lrt=lrt;
-    if(tile==rdp.first_tile)rdp.texture_tile=*t;
-    rdp.textures_changed[0]=rdp.textures_changed[1]=true;''')
-    pc=pc.replace('    rsp.texture_scaling_factor.s = sc;', '    rdp.first_tile=tile;rdp.texture_tile=rdp.tiles[tile];\n    rdp.textures_changed[0]=rdp.textures_changed[1]=true;\n    rsp.texture_scaling_factor.s = sc;')
+    if(tile==rdp.first_tile){rdp.texture_tile=*t;rdp.textures_changed[0]=true;}
+    else if(tile==((rdp.first_tile+1)&7))rdp.textures_changed[1]=true;''')
+    pc=pc.replace('    rsp.texture_scaling_factor.s = sc;', '    if(rdp.first_tile!=tile){rdp.first_tile=tile;rdp.texture_tile=rdp.tiles[tile];rdp.textures_changed[0]=rdp.textures_changed[1]=true;}\n    if(rsp.texture_scaling_factor.s==sc&&rsp.texture_scaling_factor.t==tc)return;\n    rsp.texture_scaling_factor.s = sc;')
     pc=pc.replace('static void import_texture(int tile) {', '''static void import_texture_inner(int tile) {
     nativePrepareTile(tile);
     if(rdp.texture_tile.fmt==G_IM_FMT_CI)rdp.palette_hash=rdp.texture_tile.siz==G_IM_SIZ_4b?
