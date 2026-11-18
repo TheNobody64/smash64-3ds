@@ -84,6 +84,9 @@ def main():
         pc=pc.replace(needle,needle+'\n    if(rdp.'+name+'_color.r!=r||rdp.'+name+'_color.g!=g||rdp.'+name+'_color.b!=b||rdp.'+name+'_color.a!=a)gfx_flush();')
     # Preserve the RDP ONE operand. SM64's original compact combiner omitted it.
     pc=pc.replace('uint32_t cc_id','uint64_t cc_id')
+    pc=pc.replace('struct ColorCombiner {\n    uint32_t cc_id;', 'struct ColorCombiner {\n    uint32_t cc_id;\n    uint8_t num_inputs;\n    bool used_textures[2];')
+    pc=pc.replace('    comb->prg = gfx_lookup_or_create_shader_program(shader_id);', '    comb->prg = gfx_lookup_or_create_shader_program(shader_id);\n    gfx_rapi->shader_get_info(comb->prg, &comb->num_inputs, comb->used_textures);')
+    pc=pc.replace('    uint8_t num_inputs;\n    bool used_textures[2];\n    gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);', '    uint8_t num_inputs=comb->num_inputs;\n    const bool *used_textures=comb->used_textures;')
     pc=pc.replace('(cc_id >> 24) << 24','(uint32_t)(cc_id >> 32) << 24')
     pc=pc.replace('(cc_id >> (i * 3)) & 7','(cc_id >> (i * 4)) & 15')
     pc=pc.replace('(cc_id >> (12 + i * 3)) & 7','(cc_id >> (16 + i * 4)) & 15')
@@ -104,6 +107,27 @@ def main():
     pc=pc.replace('    lrxf = gfx_adjust_x_for_aspect_ratio(lrxf);','')
     pc=pc.replace('color_combiner_pool[64]','color_combiner_pool[512]').replace('uint8_t color_combiner_pool_size','uint16_t color_combiner_pool_size')
     pc=pc.replace('struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];','SUPPORT_CHECK(color_combiner_pool_size < 512);\n    struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];')
+    pc=function(pc,'gfx_lookup_or_create_color_combiner','''
+    static struct ColorCombiner *prev_combiner;
+    static struct ColorCombiner *lookup_cache[256];
+    uint32_t h=(uint32_t)cc_id^(uint32_t)(cc_id>>32);
+    h^=h>>16;h*=0x7feb352du;h^=h>>15;
+    unsigned slot=h&255u;
+    if(prev_combiner&&prev_combiner->cc_id==cc_id)return prev_combiner;
+    struct ColorCombiner* cached=lookup_cache[slot];
+    if(cached&&cached->cc_id==cc_id)return prev_combiner=cached;
+    for(size_t i=0;i<color_combiner_pool_size;i++){
+        if(color_combiner_pool[i].cc_id==cc_id){
+            lookup_cache[slot]=&color_combiner_pool[i];
+            return prev_combiner=&color_combiner_pool[i];
+        }
+    }
+    gfx_flush();
+    SUPPORT_CHECK(color_combiner_pool_size<512);
+    struct ColorCombiner* comb=&color_combiner_pool[color_combiner_pool_size++];
+    gfx_generate_cc(comb,cc_id);
+    lookup_cache[slot]=comb;
+    return prev_combiner=comb;''')
     pc=pc.replace('uint32_t other_mode_l, other_mode_h;', 'uint32_t other_mode_l, other_mode_h;\n    uint32_t blend_color,prim_depth,combine_raw[2];')
     pc=pc.replace('            case G_SETCOMBINE:', '            case G_SETCOMBINE:\n                rdp.combine_raw[0]=cmd->words.w0;rdp.combine_raw[1]=cmd->words.w1;')
     pc=pc.replace('    uint64_t cc_id = rdp.combine_mode;', '    #ifdef SSB_BENCH\n    nativeCombineTrace(rdp.combine_raw[0],rdp.combine_raw[1],rdp.other_mode_l,rdp.other_mode_h);\n    #endif\n    uint64_t cc_id = rdp.combine_mode;')
