@@ -1,9 +1,11 @@
 #include <3ds.h>
 #include <stdint.h>
 #include "native_render_thread.h"
+#include "native_hw.h"
 extern void nativeRenderDisplayList(void*);
 extern void port_log(const char*,...);
-/* On the New 3DS the display list is translated on the third CPU core, as
+/* On the New 3DS the display list is translated on the third CPU core (the
+ * original 3DS has none; native_hw.h says when core 1 may be tried), as
  * the N64's RCP drew while its CPU went on. The main thread keeps the
  * original order of events: the scheduler's "task done" still arrives on
  * the next simulated vblank, and nothing but the scheduler, audio and
@@ -53,20 +55,42 @@ static void waitFor(volatile int* flag) {
 }
 void nativeRenderWait(void) {waitFor(&renderTranslating);}
 void nativeRenderIdle(void) {waitFor(&renderBusy);}
+/* Not every libctru release names this call the same way, and a missing
+ * symbol must not break the build; a null address means "leave the limit". */
+extern Result APT_SetAppCpuTimeLimit(u32 percent) __attribute__((weak));
+extern Result APT_SetApplicationCpuTimeLimit(u32 percent) __attribute__((weak));
+static Result setSyscoreLimit(unsigned percent) {
+    if(APT_SetAppCpuTimeLimit)return APT_SetAppCpuTimeLimit(percent);
+    if(APT_SetApplicationCpuTimeLimit)return APT_SetApplicationCpuTimeLimit(percent);
+    return -1;
+}
 static void renderStart(void) {
     static int tried;
     if(tried)return;
     tried=1;
-    bool isNew=false;APT_CheckNew3DS(&isNew);
 #ifdef SSB_BENCH
     if(native_test_sync_render)return;
 #endif
-    if(!isNew)return;
+    const NativeHwTuning* hw=nativeHwTuning();
+    if(hw->render_core<0){
+        port_log("RENDER on the main thread (%s profile)\n",nativeHwFull()?"full":"legacy");
+        return;
+    }
+    /* Core 1 is the system core of an original 3DS. Services that this game
+     * depends on (GSP for GPU submission, HID, the DSP service) run there, so
+     * an application only gets the share APT grants it, and a limit that is
+     * too generous starves them. If the limit or the thread is refused the
+     * game keeps rendering on the main thread, which is always correct. */
+    if(hw->render_core==1){
+        Result limit=setSyscoreLimit(hw->syscore_percent);
+        port_log("RENDER syscore limit %u%%: %08lx\n",hw->syscore_percent,(unsigned long)limit);
+        if(R_FAILED(limit))return;
+    }
     LightEvent_Init(&renderGo,RESET_ONESHOT);LightEvent_Init(&renderDone,RESET_ONESHOT);
     s32 priority=0x30;svcGetThreadPriority(&priority,CUR_THREAD_HANDLE);
-    renderThread=threadCreate(renderMain,NULL,256*1024,priority,2,false);
+    renderThread=threadCreate(renderMain,NULL,256*1024,priority,hw->render_core,false);
     native_render_async=renderThread!=NULL;
-    port_log("RENDER thread on core 2: %s\n",renderThread?"yes":"unavailable, rendering on the main thread");
+    port_log("RENDER thread on core %d: %s\n",hw->render_core,renderThread?"yes":"unavailable, rendering on the main thread");
 }
 /* HOME Menu, POWER menu and sleep: citro3d's own APT hook drains and clears
  * the GPU queue on suspend, which must not happen while this thread is still

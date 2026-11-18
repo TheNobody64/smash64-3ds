@@ -2,6 +2,12 @@
  * Texture objects are copied because sampler state can change later in a frame.
  * Replaced texture allocations survive until the GPU completes both eyes. */
 #include "native_perf.h"
+extern int nativeHwFull(void);
+/* Soft failures. The New 3DS keeps its hard stop so a regression stays loud in
+ * tests. The original 3DS drops the affected work for that frame and keeps
+ * running; the first 16 events, then every 256th, reach boot.log. */
+unsigned native_degraded_events;
+#define NATIVE_DEGRADED(...) do{ if(++native_degraded_events<=16||(native_degraded_events&255)==0)port_log("DEGRADED " __VA_ARGS__); }while(0)
 unsigned native_depth_mask,native_stencil_ref,native_alpha_threshold;
 volatile uint32_t native_test_magnifier_capture,native_magnifier_draws;
 typedef struct NativeDraw {
@@ -65,7 +71,11 @@ static void nativeQueueBegin(void) {
     native_perf_render.upload_bytes=0;
 }
 static void nativeQueueDraw(int first,int count) {
-    if(nativeDrawCount==4096){port_log("Draw queue exhausted\n");abort();}
+    if(nativeDrawCount==4096){
+        if(nativeHwFull()){port_log("Draw queue exhausted\n");abort();}
+        NATIVE_DEGRADED("draw queue exhausted, draw skipped\n");
+        return;
+    }
     NativeDraw* p=&nativeDraws[nativeDrawCount++];
     nativeQueuedDraws++;
     const struct CCFeatures* cc=&sShaderProgramPool[sCurShader].cc_features;

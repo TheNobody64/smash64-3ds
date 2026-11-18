@@ -53,6 +53,7 @@ The title IDs are `000400000FF64000` and `000400000FF64100`. Neither can replace
 | X or Y | Jump |
 | L or R | Shield |
 | ZL or ZR | Grab |
+| R on an original 3DS/2DS (no ZL/ZR) | Grab (L stays Shield) |
 | D-pad Up | Taunt |
 | Start | Pause |
 | D-pad, on fighter select | Costume color (like the N64 C buttons) |

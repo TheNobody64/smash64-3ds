@@ -1,0 +1,192 @@
+--- vendor/BattleShip/port/audio/mixer.c
++++ 3ds/src/mixer_3ds.c
+@@ -1,4 +1,10 @@
+ /*
++ * PERF COPY of vendor/BattleShip/port/audio/mixer.c for the Old 3DS (single ARM11 core, no SIMD).
++ * Bit-exact with the original (see verify/test_mixer.c: 1.2M envmixer + 300k ADPCM calls compared).
++ * Changes: (1) cache the one-shot dump getenv() calls, (2) aEnvMixerImpl settled-ramp fast path,
++ * (3) fully unrolled ADPCM predictor. Everything else is unchanged; diff against the original to review.
++ */
++/*
+  * SPDX-License-Identifier: MIT
+  *
+  * Portions of this file are derived from the Starship (Star Fox 64) PC port
+@@ -35,7 +41,7 @@
+ #include <string.h>
+ #include <stdio.h>
+ 
+-#include "mixer.h"
++#include "audio/mixer.h"   /* resolved via -I port/ (this copy lives in src/) */
+ 
+ /* ------------------------------------------------------------------ */
+ /*  Rounding helpers                                                  */
+@@ -89,6 +95,19 @@
+ 	uint8_t  buf[DMEM_SIZE];
+ } rspa;
+ 
++
++/* PERF (Old 3DS): the dump switches are one-shot diagnostics, so read the
++ * environment once. Previously the tail of aADPCMdecImpl/aResampleImpl called
++ * getenv() on every voice of every audio chunk (a linear environ walk). */
++static int sAdpcmDumpEnv = -1, sResampleDumpEnv = -1;
++static int mixer_dump_enabled(const char *name, int *cache) {
++	if (*cache < 0) {
++		const char *e = getenv(name);
++		*cache = (e != NULL && e[0] == '1') ? 1 : 0;
++	}
++	return *cache;
++}
++
+ /* ------------------------------------------------------------------ */
+ /*  Resample table — 64-entry 4-tap Lagrange interpolation            */
+ /* ------------------------------------------------------------------ */
+@@ -240,7 +259,7 @@
+ 	uint8_t *in = BUF_U8(rspa.in);
+ 	int16_t *out = BUF_S16(rspa.out);
+ 	int nbytes = ROUND_UP_32(rspa.nbytes);
+-	int i, j, k;
++	int i, j;
+ 
+ 	/* PORT: dump first ADPCM call to disk for offline reference comparison.
+ 	 * Captures: book (rspa.adpcm_table), input bytes (DMEM at rspa.in), prior
+@@ -324,13 +343,32 @@
+ 				}
+ 			}
+ 
+-			for (j = 0; j < 8; j++) {
+-				int32_t acc = tbl[0][j] * prev2 + tbl[1][j] * prev1 + (ins[j] << 11);
+-				for (k = 0; k < j; k++) {
+-					acc += tbl[1][((j - k) - 1)] * ins[k];
+-				}
+-				acc >>= 11;
+-				*out++ = clamp16(acc);
++			/* PERF (Old 3DS): the triangular k-loop had a different trip count
++			 * for every j, so every sample paid a loop-exit branch. Fully
++			 * unrolled; identical integer arithmetic (int32 wraps under -fwrapv,
++			 * and addition order does not matter modulo 2^32). */
++			{
++				const int16_t *a = tbl[0], *b = tbl[1];
++				const int i0 = ins[0], i1 = ins[1], i2 = ins[2], i3 = ins[3];
++				const int i4 = ins[4], i5 = ins[5], i6 = ins[6];
++				int32_t acc;
++				acc = a[0] * prev2 + b[0] * prev1 + (ins[0] << 11);
++				*out++ = clamp16(acc >> 11);
++				acc = a[1] * prev2 + b[1] * prev1 + (ins[1] << 11) + b[0] * i0;
++				*out++ = clamp16(acc >> 11);
++				acc = a[2] * prev2 + b[2] * prev1 + (ins[2] << 11) + b[1] * i0 + b[0] * i1;
++				*out++ = clamp16(acc >> 11);
++				acc = a[3] * prev2 + b[3] * prev1 + (ins[3] << 11) + b[2] * i0 + b[1] * i1 + b[0] * i2;
++				*out++ = clamp16(acc >> 11);
++				acc = a[4] * prev2 + b[4] * prev1 + (ins[4] << 11) + b[3] * i0 + b[2] * i1 + b[1] * i2 + b[0] * i3;
++				*out++ = clamp16(acc >> 11);
++				acc = a[5] * prev2 + b[5] * prev1 + (ins[5] << 11) + b[4] * i0 + b[3] * i1 + b[2] * i2 + b[1] * i3 + b[0] * i4;
++				*out++ = clamp16(acc >> 11);
++				acc = a[6] * prev2 + b[6] * prev1 + (ins[6] << 11) + b[5] * i0 + b[4] * i1 + b[3] * i2 + b[2] * i3 + b[1] * i4 + b[0] * i5;
++				*out++ = clamp16(acc >> 11);
++				acc = a[7] * prev2 + b[7] * prev1 + (ins[7] << 11) + b[6] * i0 + b[5] * i1 + b[4] * i2 + b[3] * i3 + b[2] * i4 + b[1] * i5 + b[0] * i6;
++				*out++ = clamp16(acc >> 11);
++				(void)i6;
+ 			}
+ 		}
+ 		nbytes -= 16 * sizeof(int16_t);
+@@ -340,7 +378,7 @@
+ 	/* Append output samples to the dump file (only on first call). */
+ 	{
+ 		static int output_dumped = 0;
+-		if (!output_dumped && getenv("SSB64_ADPCM_DUMP") && getenv("SSB64_ADPCM_DUMP")[0] == '1') {
++		if (!output_dumped && mixer_dump_enabled("SSB64_ADPCM_DUMP", &sAdpcmDumpEnv)) {
+ 			output_dumped = 1;
+ 			FILE *f = fopen("/tmp/adpcm_dump_output.bin", "wb");
+ 			if (f) {
+@@ -453,8 +491,7 @@
+ 	/* Append output samples to the dump on first call only. */
+ 	{
+ 		static int output_dumped = 0;
+-		if (!output_dumped && getenv("SSB64_RESAMPLE_DUMP") &&
+-		    getenv("SSB64_RESAMPLE_DUMP")[0] == '1') {
++		if (!output_dumped && mixer_dump_enabled("SSB64_RESAMPLE_DUMP", &sResampleDumpEnv)) {
+ 			output_dumped = 1;
+ 			FILE *f = fopen("/tmp/resample_dump_output.bin", "wb");
+ 			if (f) {
+@@ -628,23 +665,64 @@
+ 		ramps[1].value = load_s32_from_s16(save + 18);
+ 	}
+ 
+-	for (i = 0; i < count; i++) {
+-		int16_t s = in[i];
+-		int16_t l_vol = ramp_step(&ramps[0]);
+-		int16_t r_vol = ramp_step(&ramps[1]);
+-		int16_t l_dry = clamp16(((int32_t)l_vol * dry_amt + 0x4000) >> 15);
+-		int16_t r_dry = clamp16(((int32_t)r_vol * dry_amt + 0x4000) >> 15);
+-		int16_t l_wet = clamp16(((int32_t)l_vol * wet_amt + 0x4000) >> 15);
+-		int16_t r_wet = clamp16(((int32_t)r_vol * wet_amt + 0x4000) >> 15);
+-		int16_t *dryL = BUF_S16(MIX_MAIN_L);
+-		int16_t *dryR = BUF_S16(MIX_MAIN_R);
+-		int16_t *wetL = BUF_S16(MIX_AUX_L);
+-		int16_t *wetR = BUF_S16(MIX_AUX_R);
+-
+-		dryL[i] = clamp16(dryL[i] + (((int32_t)s * l_dry) >> 15));
+-		dryR[i] = clamp16(dryR[i] + (((int32_t)s * r_dry) >> 15));
+-		wetL[i] = clamp16(wetL[i] + (((int32_t)s * l_wet) >> 15));
+-		wetR[i] = clamp16(wetR[i] + (((int32_t)s * r_wet) >> 15));
++	{
++		int16_t *const dryL = BUF_S16(MIX_MAIN_L);
++		int16_t *const dryR = BUF_S16(MIX_MAIN_R);
++		int16_t *const wetL = BUF_S16(MIX_AUX_L);
++		int16_t *const wetR = BUF_S16(MIX_AUX_R);
++
++		/* Ramping phase: unchanged per-sample logic. Runs only until both
++		 * ramps have stopped (step == 0). */
++		i = 0;
++		while (i < count) {
++			int16_t s = in[i];
++			int16_t l_vol = ramp_step(&ramps[0]);
++			int16_t r_vol = ramp_step(&ramps[1]);
++			int16_t l_dry = clamp16(((int32_t)l_vol * dry_amt + 0x4000) >> 15);
++			int16_t r_dry = clamp16(((int32_t)r_vol * dry_amt + 0x4000) >> 15);
++			int16_t l_wet = clamp16(((int32_t)l_vol * wet_amt + 0x4000) >> 15);
++			int16_t r_wet = clamp16(((int32_t)r_vol * wet_amt + 0x4000) >> 15);
++
++			dryL[i] = clamp16(dryL[i] + (((int32_t)s * l_dry) >> 15));
++			dryR[i] = clamp16(dryR[i] + (((int32_t)s * r_dry) >> 15));
++			wetL[i] = clamp16(wetL[i] + (((int32_t)s * l_wet) >> 15));
++			wetR[i] = clamp16(wetR[i] + (((int32_t)s * r_wet) >> 15));
++			i++;
++			if (ramps[0].step == 0 && ramps[1].step == 0) break;
++		}
++
++		/* PERF (Old 3DS): settled phase. With step == 0 ramp_step() reaches a
++		 * fixed point after one call (value is either snapped to target or
++		 * stays put), so volumes and all four gains are constant for the rest
++		 * of the chunk. This is the steady state of nearly every voice, and it
++		 * removes 2 x int64 ramp updates and 4 x multiply+round+clamp per
++		 * sample. The wet bus is skipped only when its gains are exactly zero
++		 * (AL_FX_NONE sends fxMix 0 -> eqpower[127] == 0), where the original
++		 * clamp16(wet + 0) is a no-op. */
++		if (i < count) {
++			const int16_t l_vol = (int16_t)(ramps[0].value >> 16);
++			const int16_t r_vol = (int16_t)(ramps[1].value >> 16);
++			const int32_t l_dry = clamp16(((int32_t)l_vol * dry_amt + 0x4000) >> 15);
++			const int32_t r_dry = clamp16(((int32_t)r_vol * dry_amt + 0x4000) >> 15);
++			const int32_t l_wet = clamp16(((int32_t)l_vol * wet_amt + 0x4000) >> 15);
++			const int32_t r_wet = clamp16(((int32_t)r_vol * wet_amt + 0x4000) >> 15);
++
++			if (l_wet == 0 && r_wet == 0) {
++				for (; i < count; i++) {
++					const int32_t s = in[i];
++					dryL[i] = clamp16(dryL[i] + ((s * l_dry) >> 15));
++					dryR[i] = clamp16(dryR[i] + ((s * r_dry) >> 15));
++				}
++			} else {
++				for (; i < count; i++) {
++					const int32_t s = in[i];
++					dryL[i] = clamp16(dryL[i] + ((s * l_dry) >> 15));
++					dryR[i] = clamp16(dryR[i] + ((s * r_dry) >> 15));
++					wetL[i] = clamp16(wetL[i] + ((s * l_wet) >> 15));
++					wetR[i] = clamp16(wetR[i] + ((s * r_wet) >> 15));
++				}
++			}
++		}
+ 	}
+ 
+ 	memset(save, 0, sizeof(save));

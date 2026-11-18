@@ -160,6 +160,13 @@ static void writeMatch(const void* data){
     fprintf(f,"# active_seconds=%.4f frames=%lu average_fps=%.3f worst_ms=%.3f p50_ms_le=%.2f p95_ms_le=%.2f p99_ms_le=%.2f\n",
         (double)p->total.ticks/SYSCLOCK_ARM11,(unsigned long)p->total.frames,
         (double)p->total.frames*SYSCLOCK_ARM11/p->total.ticks,p->total.worst_us/1000.0,percentile(p,50),percentile(p,95),percentile(p,99));
+    /* Frames that took longer than one 60 Hz period (16.67 ms) and than two
+     * (33.33 ms), from the 0.25 ms histogram: bins 67 and 134 start at 16.75
+     * and 33.5 ms, so a frame just over the budget can be counted one bin
+     * late. These are the numbers a 60 FPS goal is judged by. */
+    uint32_t late=0,missed=0;
+    for(unsigned i=67;i<HIST_BINS;i++){late+=p->histogram[i];if(i>=134)missed+=p->histogram[i];}
+    fprintf(f,"# frames_ge_16_75ms=%lu frames_ge_33_5ms=%lu of=%lu\n",(unsigned long)late,(unsigned long)missed,(unsigned long)p->total.frames);
     fprintf(f,"# row_target_seconds=%u pauses_and_countdown_excluded=1 cpu_tick_includes_pacing=1 gpu_is_previous_submission=1\n",p->row_seconds);
     fprintf(f,"# histogram_bin_ms=0.25 final_bin_ge_ms=256 counts=");
     for(unsigned i=0;i<HIST_BINS;i++)fprintf(f,"%s%lu",i?";":"",(unsigned long)p->histogram[i]);

@@ -51,6 +51,10 @@ Copy that file to your SD card and install it with FBI. The title IDs are `00040
 
 Build output, extracted assets, personal configuration, and downloaded artwork are ignored by Git. Do not distribute the resulting game package; this project and its graphics dependency are released in source form.
 
+## Original 3DS / 2DS
+
+Add `--target old` to `build_release.py` (or `build_runtime.py`) for the original-3DS titles, `--target both` to build all of them. They use different title IDs and SD folders from the New 3DS titles; see [OLD-3DS.md](OLD-3DS.md) for IDs, tuning and measurement.
+
 ## Developer checks
 
 After extracting assets, the Windows host compiler can exercise the settings and bottom-screen UI:
@@ -64,6 +68,7 @@ python tools/io_host_test.py
 python tools/assets_cache_test.py
 python tools/bottom_state_test.py
 python tools/audio_pace_test.py
+python tools/old3ds_config_test.py
 ```
 
 For performance work, `python tools/build_runtime.py --bench` builds a release binary with logging that reads its scenario from `bench.txt`; `tools/azahar_bench.py` runs it in a portable Azahar and summarizes frame timing, and `tools/azahar_profile.py` samples CPU hot spots through Azahar's GDB stub. `python tools/make_builder_zip.py VERSION` makes the release builder zip.

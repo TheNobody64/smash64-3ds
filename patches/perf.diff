@@ -1,0 +1,102 @@
+--- a/3ds/tools/build.py
++++ b/3ds/tools/build.py
+@@ -61,6 +61,10 @@
+     includes += [SDK/'libctru/include']
+     return [*ARCH, '-std=gnu11', '-O2', '-g', '-fno-short-enums',
+             '-fno-strict-aliasing', '-fwrapv', '-ffp-contract=off',
++            # PERF: sqrtf() etc. no longer set errno, so each call compiles to a bare vsqrt.f32
++            # instead of vsqrt + FPSCR read + compare + branch to the libm fallback. Results are
++            # bit-identical; only errno is no longer written. The FPSCR read (vmrs) stalls VFP11.
++            '-fno-math-errno',
+             '-fno-builtin-sinf', '-fno-builtin-cosf',
+             '-ffunction-sections', '-fdata-sections',
+             '-DREGION_US=1', '-DVERSION_US=1', '-DNON_MATCHING=1',
+@@ -72,7 +76,9 @@
+             '-Wno-unknown-pragmas', '-Wno-implicit-int', '-Wno-shift-negative-value',
+             '-Wno-parentheses-equality', '-Wno-pointer-sign',
+             '-Wno-constant-conversion', '-Wno-tautological-constant-out-of-range-compare',
+-            *['-I'+str(p) for p in includes], '-isystem', str(ARM/'arm-none-eabi/include')]
++            *['-I'+str(p) for p in includes], '-isystem', str(ARM/'arm-none-eabi/include'),
++            # Experiment hook, e.g. SSB_GAME_CFLAGS="-munaligned-access". Empty by default.
++            *os.environ.get('SSB_GAME_CFLAGS', '').split()]
+ 
+ def compile_game():
+     OUT.mkdir(parents=True, exist_ok=True)
+--- a/3ds/tools/build_support.py
++++ b/3ds/tools/build_support.py
+@@ -1,6 +1,7 @@
+ """Compile the ARM asset, audio and vanilla fighter support libraries."""
+ import concurrent.futures
+ import json
++import os
+ import subprocess
+ import sys
+ from build import ROOT, UPSTREAM, ARM, SDK, BIN, OUT, ARCH, run, game_flags, GCC_VERSION, configured
+@@ -14,14 +15,15 @@
+          UPSTREAM/'port/resource/RelocFileTable.us.cpp',
+          UPSTREAM/'port/port_aobj_fixup.cpp',
+          UPSTREAM/'port/fighter_registry.cpp']
+-    c=[UPSTREAM/'port/audio/mixer.c',UPSTREAM/'port/audio/audio_dma.c']
++    c=[ROOT/'src/mixer_3ds.c',UPSTREAM/'port/audio/audio_dma.c']  # PERF: optimized copy of port/audio/mixer.c
+     cxxver=GCC_VERSION
+     cxx=configured('cxx_include',ROOT/'toolchain/c++'/cxxver if (ROOT/'toolchain/c++'/cxxver).exists() else ARM/'arm-none-eabi/include/c++'/cxxver)
+-    common=[*ARCH,'-O2','-g','-fno-strict-aliasing','-fwrapv','-ffp-contract=off',
++    common=[*ARCH,'-O2','-g','-fno-strict-aliasing','-fwrapv','-ffp-contract=off','-fno-math-errno',
+             '-ffunction-sections','-fdata-sections','-DREGION_US=1','-DVERSION_US=1','-DPORT=1',
+             '-D__3DS__','-fno-short-enums',
+             *['-I'+str(p) for p in [ROOT/'include',UPSTREAM/'port',UPSTREAM/'debug_tools',
+                UPSTREAM/'libultraship/include',SDK/'libctru/include']]]
++    common+=os.environ.get('SSB_GAME_CFLAGS','').split()  # experiment hook; empty by default
+     def one(src):
+         iscpp=src.suffix=='.cpp'
+         obj=OUT/'support'/(src.stem+'.o')
+--- a/3ds/tools/build_runtime.py
++++ b/3ds/tools/build_runtime.py
+@@ -46,12 +46,17 @@
+         if src.stem in ['game_host','vanilla_policy','render_bridge','gfx_pc','save_layout_check','stereo_camera','bottom_game','wallpaper','control_game']:
+             flags=game_flags()
+         else:
+-            flags=[*ARCH,'-std=gnu11','-O2','-g','-D__3DS__','-DSSB_BRINGUP',
++            flags=[*ARCH,'-std=gnu11','-O2','-g','-fno-math-errno','-D__3DS__','-DSSB_BRINGUP',
+                    '-ffunction-sections','-fdata-sections',
+                    '-fshort-enums' if src.stem in ['platform_3ds','performance','render_device','gfx_citro3d','bottom_3ds','io_worker'] else '-fno-short-enums',
+                    '-I'+str(SDK/'libctru/include'),'-I'+str(UPSTREAM/'port'),
+                    '-isystem',str(ARM/'arm-none-eabi/include')]
+         flags += ['-I'+str(ROOT/'include'),'-I'+str(ROOT/'renderer')]
++        # PERF experiment hook for the Fast3D interpreter and its siblings. gfx_pc.c is built with the
++        # game's conservative -fno-strict-aliasing; later flags win, so e.g.
++        #   set SSB_RENDER_CFLAGS=-fstrict-aliasing
++        # re-enables type-based alias analysis for just these files. Empty by default.
++        if src.stem in ['gfx_pc','gfx_citro3d','render_bridge']:flags += os.environ.get('SSB_RENDER_CFLAGS','').split()
+         if args.render:flags += ['-DTARGET_N3DS','-DSSB_GRAPHICS']
+         if args.release:flags += ['-DSSB_RELEASE']
+         if args.bench:flags += ['-DSSB_BENCH']
+--- a/3ds/src/platform_3ds.c
++++ b/3ds/src/platform_3ds.c
+@@ -200,9 +200,25 @@
+ #endif
+     __real_abort();
+ }
++/* PERF: ARM11 has no hardware divider, so the previous (t/C)*N + (t%C)*N/C cost two software
++ * __aeabi_uldivmod calls on every call, and this runs twice per N64-thread resume, ~12x per frame
++ * through osGetCount(), and from every osGetTime(). It is exactly floor(t*N/C) with N/C reduced by
++ * gcd 8 to 5859375/33513982. The quotient comes from a 64x64->128 multiply by
++ * M = floor(2^64*N/C) (at most one low) plus a one-step correction. Verified identical to the old
++ * formula on 27M values including every quotient step boundary (verify/test_ticks.c). */
++static inline uint64_t ssbMulHi64(uint64_t a,uint64_t b){
++    uint32_t a0=(uint32_t)a,a1=(uint32_t)(a>>32),b0=(uint32_t)b,b1=(uint32_t)(b>>32);
++    uint64_t p00=(uint64_t)a0*b0,p01=(uint64_t)a0*b1,p10=(uint64_t)a1*b0,p11=(uint64_t)a1*b1;
++    uint64_t mid=(p00>>32)+(uint32_t)p01+(uint32_t)p10;
++    return p11+(p01>>32)+(p10>>32)+(mid>>32);
++}
+ uint64_t native_time_ticks(void) {
++    _Static_assert(SYSCLOCK_ARM11==268111856ull,"tick conversion constants assume 268111856 Hz");
+     uint64_t t=svcGetSystemTick();
+-    return (t/SYSCLOCK_ARM11)*46875000ull+(t%SYSCLOCK_ARM11)*46875000ull/SYSCLOCK_ARM11;
++    uint64_t q=ssbMulHi64(t,0x2cc1e78333645f2cull);   /* floor(2^64*5859375/33513982) */
++    uint64_t r=t*5859375ull-q*33513982ull;            /* remainder, or remainder+C if q is one low */
++    if(r>=33513982ull)q++;
++    return q;
+ }
+ void native_read_pad(uint16_t* b,int8_t* x,int8_t* y) {
+     loadTestInputs();

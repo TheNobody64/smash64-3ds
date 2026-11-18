@@ -15,6 +15,7 @@
 #include "native_controls.h"
 #include "native_audio.h"
 #include "native_render_thread.h"
+#include "native_hw.h"
 
 extern void ssb_game_init(void),ssb_game_tick(void);
 extern void nativeAssetsShutdown(void);
@@ -61,6 +62,31 @@ static uint32_t audioCaptureBytes;
 static ndspWaveBuf dspCapture;
 static volatile bool dspCaptureProgress,dspCaptureDone;
 static FILE* logFile;
+#ifdef SSB_TARGET_OLD3DS
+/* boot.log: the first TRACE_MAX log lines, flushed as they are written. The
+ * installable build keeps no game.log, and a freeze (as opposed to a crash)
+ * would otherwise leave nothing to look at.
+ *
+ * A cap alone loses the lines that matter most: whatever happens after the
+ * first few hundred (a stage-select crash comes minutes in) is dropped,
+ * including the ABORT line itself. So lines that report a failure, a scene
+ * change or a memory figure are always written (up to TRACE_EXTRA_MAX more),
+ * and the last RING_LINES lines of any kind are kept in memory and written to
+ * crash.log when the game aborts. */
+static FILE* traceFile;
+static unsigned traceLines,traceExtra;
+#define TRACE_MAX 300
+#define TRACE_EXTRA_MAX 500
+#define RING_LINES 48
+#define RING_WIDTH 256
+static char traceRing[RING_LINES][RING_WIDTH];
+static unsigned traceRingNext;
+static bool traceKeep(const char* fmt) {
+    static const char* const keep[]={"ABORT","FAIL","fail","exhaust","unsupported","ssert","DEGRADED","ARENA","SCENE","MEM ","DIAG"};
+    for(unsigned i=0;i<sizeof(keep)/sizeof(keep[0]);i++)if(strstr(fmt,keep[i]))return true;
+    return false;
+}
+#endif
 static uint16_t buttons;
 static int8_t stickX,stickY;
 static bool audioReady;
@@ -112,6 +138,19 @@ static void loadTestInputs(void) {
 }
 
 void port_log(const char* fmt,...) {
+#ifdef SSB_TARGET_OLD3DS
+    {
+        char* slot=traceRing[traceRingNext++%RING_LINES];
+        va_list t;va_start(t,fmt);vsnprintf(slot,RING_WIDTH,fmt,t);va_end(t);
+        if(traceFile){
+            bool head=traceLines<TRACE_MAX;
+            if(head||(traceExtra<TRACE_EXTRA_MAX&&traceKeep(fmt))){
+                fputs(slot,traceFile);fflush(traceFile);
+                if(head)traceLines++;else traceExtra++;
+            }
+        }
+    }
+#endif
     if(!logFile||!ssb_test_logging)return;
     va_list va;va_start(va,fmt);vfprintf(logFile,fmt,va);va_end(va);
     if(strstr(fmt,"FAIL")||strstr(fmt,"assert")||strstr(fmt,"Assert")||strstr(fmt,"ABORT")||strstr(fmt,"Unexpected"))fflush(logFile);
@@ -120,6 +159,34 @@ void port_stats(const char* fmt,...) {
     if(!logFile||!ssb_test_metrics)return;
     va_list va;va_start(va,fmt);vfprintf(logFile,fmt,va);va_end(va);
 }
+#ifdef SSB_TARGET_OLD3DS
+extern unsigned nativeTextureStats(unsigned* kib,unsigned* degraded) __attribute__((weak));
+/* One line whenever the game changes scene: where memory stands as the scene
+ * starts. ARENA lines (taskman.c) report what the scene before it used. */
+static void traceSceneChange(void) {
+    static uint32_t last=0xFFFFFFFFu;
+    uint32_t scene=native_perf_game.scene;
+    if(scene==last)return;
+    last=scene;
+    struct mallinfo m=mallinfo();
+    unsigned kib=0,degraded=0,live=0;
+    if(nativeTextureStats)live=nativeTextureStats(&kib,&degraded);
+    port_log("SCENE scene=%u frame=%lu heap_used=%u KiB heap_free=%u KiB linear_free=%u KiB textures=%u (%u KiB) degraded=%u\n",
+        (unsigned)scene,(unsigned long)ssb_frame_count,(unsigned)(m.uordblks>>10),(unsigned)(m.fordblks>>10),
+        (unsigned)(linearSpaceFree()>>10),live,kib,degraded);
+}
+/* The most recent log lines, for a crash the first 300 lines of boot.log
+ * predate. */
+static void traceDumpTail(const void* caller) {
+    FILE* f=fopen(SSB_DATA_DIR "/crash.log","w");
+    if(!f)return;
+    fprintf(f,"ABORT frame=%lu scene=%u caller=%p\nlast log lines, oldest first:\n",
+        (unsigned long)ssb_frame_count,(unsigned)native_perf_game.scene,caller);
+    unsigned n=traceRingNext<RING_LINES?traceRingNext:RING_LINES;
+    for(unsigned i=0;i<n;i++)fputs(traceRing[(traceRingNext-n+i)%RING_LINES],f);
+    fclose(f);
+}
+#endif
 extern void __real_abort(void) __attribute__((noreturn));
 void __wrap_abort(void) __attribute__((noreturn));
 void __wrap_abort(void) {
@@ -127,11 +194,31 @@ void __wrap_abort(void) {
         fprintf(logFile,"ABORT frame=%lu caller=%p\n",(unsigned long)ssb_frame_count,__builtin_return_address(0));
         fflush(logFile);
     }
+#ifdef SSB_TARGET_OLD3DS
+    if(traceFile){fprintf(traceFile,"ABORT frame=%lu caller=%p\n",(unsigned long)ssb_frame_count,__builtin_return_address(0));fflush(traceFile);}
+    traceDumpTail(__builtin_return_address(0));
+#endif
     __real_abort();
 }
+/* PERF: ARM11 has no hardware divider, so the previous (t/C)*N + (t%C)*N/C cost two software
+ * __aeabi_uldivmod calls on every call, and this runs twice per N64-thread resume, ~12x per frame
+ * through osGetCount(), and from every osGetTime(). It is exactly floor(t*N/C) with N/C reduced by
+ * gcd 8 to 5859375/33513982. The quotient comes from a 64x64->128 multiply by
+ * M = floor(2^64*N/C) (at most one low) plus a one-step correction. Verified identical to the old
+ * formula on 27M values including every quotient step boundary (verify/test_ticks.c). */
+static inline uint64_t ssbMulHi64(uint64_t a,uint64_t b){
+    uint32_t a0=(uint32_t)a,a1=(uint32_t)(a>>32),b0=(uint32_t)b,b1=(uint32_t)(b>>32);
+    uint64_t p00=(uint64_t)a0*b0,p01=(uint64_t)a0*b1,p10=(uint64_t)a1*b0,p11=(uint64_t)a1*b1;
+    uint64_t mid=(p00>>32)+(uint32_t)p01+(uint32_t)p10;
+    return p11+(p01>>32)+(p10>>32)+(mid>>32);
+}
 uint64_t native_time_ticks(void) {
+    _Static_assert(SYSCLOCK_ARM11==268111856ull,"tick conversion constants assume 268111856 Hz");
     uint64_t t=svcGetSystemTick();
-    return (t/SYSCLOCK_ARM11)*46875000ull+(t%SYSCLOCK_ARM11)*46875000ull/SYSCLOCK_ARM11;
+    uint64_t q=ssbMulHi64(t,0x2cc1e78333645f2cull);   /* floor(2^64*5859375/33513982) */
+    uint64_t r=t*5859375ull-q*33513982ull;            /* remainder, or remainder+C if q is one low */
+    if(r>=33513982ull)q++;
+    return q;
 }
 void native_read_pad(uint16_t* b,int8_t* x,int8_t* y) {
     loadTestInputs();
@@ -164,7 +251,13 @@ static void scanInput(void) {
     if(held&KEY_DDOWN)buttons|=0x0400;
     if(held&KEY_DLEFT)buttons|=0x0200;
     if(held&KEY_DRIGHT)buttons|=0x0100;
-    if(held&(KEY_L|KEY_R))buttons|=0x2000;
+    /* The original 3DS and 2DS have no ZL/ZR, which would leave grab unreachable
+     * (it needs a button of its own to be a one-press action). There R takes
+     * over grab and L stays shield. Decided by the console model, so a New 3DS
+     * running the original-3DS title keeps the normal layout. */
+    const bool noZButtons=!nativeHwConsoleIsNew();
+    if(held&(noZButtons?KEY_L:(KEY_L|KEY_R)))buttons|=0x2000;
+    if(noZButtons&&(held&KEY_R))buttons|=0x0010;
     if(held&(KEY_X|KEY_Y))buttons|=0x0008;
     nativeStickFromCirclePad(pos.dx,pos.dy,&stickX,&stickY);
 }
@@ -286,13 +379,23 @@ int main(void) {
     nativeControlsLoad();
     if(nativeIoInit())native_perf_error++;
     logFile=fopen(SSB_DATA_DIR "/game.log","w");
+#ifdef SSB_TARGET_OLD3DS
+    traceFile=fopen(SSB_DATA_DIR "/boot.log","w");
+#endif
     if(logFile)setvbuf(logFile,NULL,_IOFBF,65536);
     nativeBottomInit();
     port_log("Native ARM11 startup, romfs=%08lx\n",(unsigned long)rc);
     extern u32 __ctru_heap_size,__ctru_linear_heap_size;
     port_log("MEMORY heap=%u linear=%u linear_free=%u\n",__ctru_heap_size,__ctru_linear_heap_size,linearSpaceFree());
     if(R_FAILED(rc))return 2;
-    osSetSpeedupEnable(true);initAudio();loadTestInputs();
+    nativeHwInit();
+    {const NativeHwTuning* hw=nativeHwTuning();
+     port_log("HARDWARE console_new3ds=%d full_profile=%d render_core=%d syscore_percent=%u asset_cache=%u resident_reserve=%u\n",
+        nativeHwConsoleIsNew(),nativeHwFull(),hw->render_core,hw->syscore_percent,(unsigned)hw->asset_cache_bytes,(unsigned)hw->resident_pack_reserve_bytes);}
+    /* The 804 MHz mode is a New 3DS feature and a legacy-mode title does not
+     * get it, so only ask for it where it exists. */
+    if(nativeHwFull())osSetSpeedupEnable(true);
+    initAudio();loadTestInputs();
 #ifdef SSB_BENCH
     {
         /* scene stage fkind frames slider: -1 keeps a default. */
@@ -324,7 +427,10 @@ int main(void) {
         setenv("SSB64_START_SCENE",scene,1);
     }
     nativePerfInit();aptHook(&performanceAptHook,performanceAptEvent,NULL);
+    port_log("BOOT starting the game\n");
+    port_scene_heap_note("before game init",0,NULL);
     ssb_game_init();
+    port_log("BOOT game init returned\n");
     uint64_t frameWindow=svcGetSystemTick(),frameWork=0;
     fpsWindow=frameWindow;fpsDisplayLists=ssb_display_lists;
     while(aptMainLoop()) {
@@ -336,6 +442,9 @@ int main(void) {
         uint64_t startTick=svcGetSystemTick();native_render_tick_start=startTick;ssb_game_tick();
         uint64_t endTick=svcGetSystemTick();
         updateFps(endTick);
+#ifdef SSB_TARGET_OLD3DS
+        traceSceneChange();
+#endif
         nativeBottomFrame(native_fps_tenths,audioReady);
         endTick=svcGetSystemTick();frameWork+=endTick-startTick;
         nativePerfTick(endTick,endTick-startTick,ssb_display_lists,audioDrops);

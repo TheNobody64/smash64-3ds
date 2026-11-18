@@ -1,5 +1,6 @@
 #include "native_assets.h"
 #include "native_perf.h"
+#include "native_hw.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -20,7 +21,10 @@ std::array<std::shared_ptr<RelocFile>,FileCount> retained;
 std::array<uint32_t,FileCount> age{};
 size_t retainedBytes;
 uint32_t cacheClock;
-constexpr size_t CacheBudget=1024*1024;
+// Set from the hardware profile in openPack(): 1 MiB on the full New 3DS
+// profile (released behaviour), larger on the legacy profile where the whole
+// pack is not kept resident by default.
+size_t CacheBudget=1024*1024;
 FILE* pack;
 uint8_t* residentPack;
 size_t packBytes;
@@ -47,6 +51,7 @@ void openPack() {
     std::fclose(index);
     for(unsigned i=0;i<FileCount;i++)if(dependencyOffsets[i]>meta[3]||dependencyOffsets[i+1]>meta[3]||
         dependencyOffsets[i+1]-dependencyOffsets[i]!=assetIndex[i].deps)fail("dependency index mismatch");
+    CacheBudget=nativeHwTuning()->asset_cache_bytes;
     // The New 3DS capability profile provides an 84 MiB ordinary heap, in
     // addition to a separate 32 MiB GPU pool. Keep the 16.34 MiB pristine pack
     // here so stage changes never wait for many small SD requests. Load once
@@ -56,7 +61,21 @@ void openPack() {
     packBytes=(size_t)length;
     for(const auto& e:assetIndex)if(e.offset>packBytes||e.size>packBytes-e.offset||e.deps*2>packBytes-e.offset-e.size)
         fail("pack entry outside payload");
-    residentPack=(uint8_t*)std::malloc(packBytes);
+    // The legacy profile has roughly half the ordinary heap, and the game
+    // allocates its scene arenas from the same heap after this point. A
+    // malloc that merely succeeds now says nothing about what is left for
+    // them, so residency needs an explicit reserve (tuning.txt); without one
+    // the pack stays on the SD card behind the bounded cache.
+    const size_t reserve=nativeHwFull()?0:nativeHwTuning()->resident_pack_reserve_bytes;
+    bool resident=nativeHwFull()||reserve>0;
+    if(resident&&reserve){
+        // Probe for pack + reserve in one block, then release it again.
+        void* probe=std::malloc(packBytes+reserve);
+        resident=probe!=nullptr;std::free(probe);
+    }
+    residentPack=resident?(uint8_t*)std::malloc(packBytes):nullptr;
+    port_log("ASSET pack=%u resident=%d cache=%u full_profile=%d reserve=%u\n",(unsigned)packBytes,residentPack!=nullptr,
+        (unsigned)CacheBudget,nativeHwFull(),(unsigned)reserve);
     if(residentPack){
         std::rewind(pack);
         if(std::fread(residentPack,1,packBytes,pack)!=packBytes)fail("truncated resident pack");

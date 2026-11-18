@@ -5446,6 +5446,10 @@ GObj* efManagerYoshiEntryEggMakeEffect(Vec3f *pos)
     GObj *effect_gobj;
     DObj *dobj;
 
+#ifdef PORT
+    extern void port_diag_open(const char *what); /* 3ds/include/native_diag.h */
+    port_diag_open("yoshi entry egg");
+#endif
     effect_gobj = efManagerMakeEffectNoForce(&dEFManagerYoshiEntryEggEffectDesc);
 
     if (effect_gobj == NULL)
@@ -5495,6 +5499,10 @@ GObj* efManagerYoshiEggLayMakeEffect(GObj *fighter_gobj)
     GObj *effect_gobj;
     DObj *dobj;
 
+#ifdef PORT
+    extern void port_diag_open(const char *what); /* 3ds/include/native_diag.h */
+    port_diag_open("yoshi egg lay");
+#endif
     fp = ftGetStruct(fighter_gobj);
 
     effect_gobj = efManagerMakeEffectForce(&dEFManagerYoshiEggLayEffectDesc);

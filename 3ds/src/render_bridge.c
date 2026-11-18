@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include "gfx_pc.h"
 #include "rsp_platform.h"
+#include "native_diag.h"
 extern void* portRelocTryResolvePointer(uint32_t);
 extern bool portRelocFindContainingFile(const void*,uintptr_t*,size_t*);
 extern void port_log(const char*,...);
@@ -150,6 +151,66 @@ void nativeUnknownOpcode(unsigned opcode,const void*p) {fail("unsupported opcode
 void nativeRenderAssertion(const char* expression,int line,const void* p) {port_log("Renderer assertion line=%d expression=%s\n",line,expression);fail("assert",line,p);}
 /* Runs for every triangle, so it has its own switch rather than following
  * general logging (which bench builds enable). */
+volatile uint32_t native_diag_until;
+void port_diag_open(const char* what){
+    native_diag_until=ssb_frame_count+NATIVE_DIAG_FRAMES;
+    port_log("DIAG open %s frame=%u\n",what,(unsigned)ssb_frame_count);
+}
+/* Names of the RDP color-combiner inputs, by field. An input the frontend does
+ * not implement (it reads as zero, so a multiply by it renders black) is marked. */
+static const char* diagA(unsigned v){static const char* n[8]={"COMBINED","TEXEL0","TEXEL1","PRIM","SHADE","ENV","ONE","NOISE"};return v<8?n[v]:"0";}
+static const char* diagB(unsigned v){static const char* n[8]={"COMBINED","TEXEL0","TEXEL1","PRIM","SHADE","ENV","CENTER","K4"};return v<8?n[v]:"0";}
+static const char* diagC(unsigned v){static const char* n[16]={"COMBINED","TEXEL0","TEXEL1","PRIM","SHADE","ENV","SCALE","COMBINED_A","TEXEL0_A","TEXEL1_A","PRIM_A","SHADE_A","ENV_A","LOD_FRAC","PRIM_LOD_FRAC","K5"};return v<16?n[v]:"0";}
+static const char* diagD(unsigned v){static const char* n[8]={"COMBINED","TEXEL0","TEXEL1","PRIM","SHADE","ENV","ONE","0"};return n[v&7];}
+static const char* diagAlpha(unsigned v){static const char* n[8]={"COMBINED_A","TEXEL0_A","TEXEL1_A","PRIM_A","SHADE_A","ENV_A","ONE","0"};return n[v&7];}
+static const char* diagAlphaC(unsigned v){static const char* n[8]={"LOD_FRAC","TEXEL0_A","TEXEL1_A","PRIM_A","SHADE_A","ENV_A","PRIM_LOD_FRAC","0"};return n[v&7];}
+void nativeDiagDraw(const NativeDiagState* s){
+    static struct{uint32_t a,b,gm,ol,oh,t0,t1;}seen[24];static unsigned count;static int full;
+    uint32_t t0=(uint32_t)(uintptr_t)s->tile[0].origin,t1=(uint32_t)(uintptr_t)s->tile[1].origin;
+    /* One entry per combiner/mode/texture set: the first draw of each is logged
+     * with the colors it had, not every later animation step. */
+    for(unsigned i=0;i<count;i++)if(seen[i].a==s->cc0&&seen[i].b==s->cc1&&seen[i].gm==s->geometry&&seen[i].ol==s->om_l&&seen[i].oh==s->om_h&&
+        seen[i].t0==t0&&seen[i].t1==t1)return;
+    if(count==24){if(!full){full=1;port_log("DIAG draw table full\n");}return;}
+    seen[count].a=s->cc0;seen[count].b=s->cc1;seen[count].gm=s->geometry;seen[count].ol=s->om_l;seen[count].oh=s->om_h;
+    seen[count].t0=t0;seen[count++].t1=t1;
+    uint32_t w0=s->cc0,w1=s->cc1;
+    unsigned a0=(w0>>20)&15,c0=(w0>>15)&31,Aa0=(w0>>12)&7,Ac0=(w0>>9)&7,a1=(w0>>5)&15,c1=w0&31;
+    unsigned b0=(w1>>28)&15,b1=(w1>>24)&15,Aa1=(w1>>21)&7,Ac1=(w1>>18)&7,d0=(w1>>15)&7,Ab0=(w1>>12)&7,Ad0=(w1>>9)&7,d1=(w1>>6)&7,Ab1=(w1>>3)&7,Ad1=w1&7;
+    /* mapped by the frontend: 0..5 inputs, 6 as ONE for A and D, 8 TEXEL0_A, 13 LOD_FRAC, 14 PRIM_LOD_FRAC */
+    int bad=(a0==7)||(b0==6||b0==7)||c0==6||c0==7||c0==9||c0==10||c0==11||c0==12||c0==15;
+    port_log("DIAG draw#%u gm=%08x om=%08x,%08x cycle=%u tex=%u,%u prim=%u,%u,%u,%u env=%u,%u,%u,%u lod=%u shade0=%u,%u,%u,%u lights=%u ambient=%u,%u,%u light0=%u,%u,%u\n",
+        count,(unsigned)s->geometry,(unsigned)s->om_h,(unsigned)s->om_l,(unsigned)(((s->om_h>>20)&3)+1),s->used[0],s->used[1],
+        s->prim[0],s->prim[1],s->prim[2],s->prim[3],s->env[0],s->env[1],s->env[2],s->env[3],s->prim_lod,s->shade[0],s->shade[1],s->shade[2],s->shade[3],
+        s->lights,s->ambient[0],s->ambient[1],s->ambient[2],s->light0[0],s->light0[1],s->light0[2]);
+    port_log("DIAG   cc %08x %08x  cycle1 rgb=(%s-%s)*%s+%s alpha=(%s-%s)*%s+%s%s\n",(unsigned)w0,(unsigned)w1,
+        diagA(a0),diagB(b0),diagC(c0),diagD(d0),diagAlpha(Aa0),diagAlpha(Ab0),diagAlphaC(Ac0),diagAlpha(Ad0),
+        bad?"  <-- input the frontend reads as ZERO":"");
+    port_log("DIAG   cc cycle2 rgb=(%s-%s)*%s+%s alpha=(%s-%s)*%s+%s\n",diagA(a1),diagB(b1),diagC(c1),diagD(d1),diagAlpha(Aa1),diagAlpha(Ab1),diagAlphaC(Ac1),diagAlpha(Ad1));
+    for(unsigned u=0;u<2;u++)if(s->used[u])
+        port_log("DIAG   tile%u fmt=%u siz=%u pal=%u cms=%u cmt=%u tmem=%u line=%u size=%ux%u loaded_from=%p first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+            u,s->tile[u].fmt,s->tile[u].siz,s->tile[u].palette,s->tile[u].cms,s->tile[u].cmt,s->tile[u].tmem,s->tile[u].line,
+            (unsigned)s->tile[u].width,(unsigned)s->tile[u].height,s->tile[u].origin,
+            s->tile[u].bytes[0],s->tile[u].bytes[1],s->tile[u].bytes[2],s->tile[u].bytes[3],s->tile[u].bytes[4],s->tile[u].bytes[5],s->tile[u].bytes[6],s->tile[u].bytes[7]);
+    port_log("DIAG   palette0=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",s->palette[0],s->palette[1],s->palette[2],s->palette[3],
+        s->palette[4],s->palette[5],s->palette[6],s->palette[7],s->palette[8],s->palette[9],s->palette[10],s->palette[11],s->palette[12],s->palette[13],s->palette[14],s->palette[15]);
+}
+void nativeDiagTexture(const uint8_t* px,unsigned pitch,unsigned w,unsigned h,unsigned fmt,unsigned siz,unsigned pal,unsigned tlut,const uint8_t* palette,const void* source){
+    static unsigned lines;
+    if(lines>=40)return;
+    lines++;
+    unsigned clear=0,black=0,visible=0;unsigned long sr=0,sg=0,sb=0;
+    for(unsigned y=0;y<h;y++)for(unsigned x=0;x<w;x++){
+        const uint8_t* p=px+((size_t)y*pitch+x)*4;
+        if(!p[3]){clear++;continue;}
+        visible++;sr+=p[0];sg+=p[1];sb+=p[2];
+        if(!(p[0]|p[1]|p[2]))black++;
+    }
+    port_log("DIAG tex fmt=%u siz=%u pal=%u tlut=%u %ux%u transparent=%u visible=%u black=%u mean=%u,%u,%u pal=%02x%02x%02x%02x%02x%02x%02x%02x src=%p%s\n",
+        fmt,siz,pal,tlut,w,h,clear,visible,black,visible?(unsigned)(sr/visible):0,visible?(unsigned)(sg/visible):0,visible?(unsigned)(sb/visible):0,
+        palette[0],palette[1],palette[2],palette[3],palette[4],palette[5],palette[6],palette[7],source,
+        visible&&black*10>=visible*9?"  <-- BLACKTEX":"");
+}
 volatile uint32_t native_test_combine_trace;
 void nativeCombineTrace(uint32_t a,uint32_t b,uint32_t l,uint32_t h){
     if(!native_test_combine_trace)return;
