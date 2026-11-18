@@ -56,15 +56,15 @@ def main():
         literal=format(value,'.9g')
         if '.' not in literal and 'e' not in literal: literal += '.0'
         values.append(literal+'f')
-    lut=',\\n'.join('    '+', '.join(values[i:i+8]) for i in range(0,256,8))
-    pc=pc.replace('#define MAX_LIGHTS 7', '#define MAX_LIGHTS 7\\nstatic const float color_lut[256] = {\\n'+lut+'\\n};')
+    lut=',\n'.join('    '+', '.join(values[i:i+8]) for i in range(0,256,8))
+    pc=pc.replace('#define MAX_LIGHTS 7', '#define MAX_LIGHTS 7\nstatic const float color_lut[256] = {\n'+lut+'\n};')
     # Matrix stack changes are cheap to record; materialize MP only when a
     # consumer needs it (vertex transform, MOVEWORD matrix edit, or special opcode).
-    pc=pc.replace('    float MP_matrix[4][4];', '    float MP_matrix[4][4];\\n    bool mp_dirty;')
+    pc=pc.replace('    float MP_matrix[4][4];', '    float MP_matrix[4][4];\n    bool mp_dirty;')
     pc=pc.replace('static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {',
-        'static void gfx_ensure_mp_matrix(void) {\\n    if (!rsp.mp_dirty) return;\\n    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);\\n    rsp.mp_dirty = false;\\n}\\n\\nstatic void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {')
-    pc=pc.replace('    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);\\n}\\n\\nstatic void gfx_sp_pop_matrix',
-        '    rsp.mp_dirty = true;\\n}\\n\\nstatic void gfx_sp_pop_matrix')
+        'static void gfx_ensure_mp_matrix(void) {\n    if (!rsp.mp_dirty) return;\n    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);\n    rsp.mp_dirty = false;\n}\n\nstatic void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {')
+    pc=pc.replace('    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);\n}\n\nstatic void gfx_sp_pop_matrix',
+        '    rsp.mp_dirty = true;\n}\n\nstatic void gfx_sp_pop_matrix')
     pc=function(pc,'gfx_sp_pop_matrix','''    while (count--) {
         if (rsp.modelview_matrix_stack_size > 0) {
             --rsp.modelview_matrix_stack_size;
@@ -72,7 +72,7 @@ def main():
         }
     }
     rsp.lights_changed = true;''')
-    pc=pc.replace('static void gfx_sp_reset() {', 'static void gfx_sp_reset() {\\n    rsp.mp_dirty=false;')
+    pc=pc.replace('static void gfx_sp_reset() {', 'static void gfx_sp_reset() {\n    gfx_ensure_mp_matrix();')
     pc=pc.replace('float wMod = w * 1.2f; // expanded w-range for testing clip rejection', 'float wMod=w+(native_stereo_perspective?fabsf(gSliderLevel*NATIVE_STEREO_SHIFT_MAX*(w-native_stereo_focus_w)):0.0f);')
     pc=pc.replace('if (y < -wMod)', 'if (y < -w)').replace('if (y > wMod)', 'if (y > w)')
     # N64 intensity textures replicate intensity into alpha as well as RGB.
